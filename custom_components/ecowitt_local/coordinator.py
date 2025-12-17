@@ -25,6 +25,7 @@ from .const import (
     BATTERY_SENSORS,
     SYSTEM_SENSORS,
     GATEWAY_SENSORS,
+    WS90_HEX_SENSORS,
 )
 from .sensor_mapper import SensorMapper
 
@@ -217,6 +218,7 @@ class EcowittLocalDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
         
         # Extract piezoRain data (rain sensor readings from WS90/WH40)
         piezo_rain = raw_data.get("piezoRain", [])
+        ws90_metadata = None
         if piezo_rain:
             _LOGGER.debug("Found piezoRain data with %d items", len(piezo_rain))
             # Process rain sensor data structure
@@ -229,14 +231,22 @@ class EcowittLocalDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                     all_sensor_items.append({"id": sensor_id, "val": sensor_val})
                     _LOGGER.debug("Added rain sensor: %s = %s", sensor_id, sensor_val)
                     
-                    # Add battery sensor if present in the item
-                    if "battery" in item and item["battery"]:
-                        # For WS90, battery is associated with the last rain item
-                        if sensor_id == "0x13":  # Total rain - usually the last item with battery info
-                            battery_key = "ws90batt"
-                            battery_val = str(int(item["battery"]) * 20) if item["battery"].isdigit() else item["battery"]
-                            all_sensor_items.append({"id": battery_key, "val": battery_val})
-                            _LOGGER.debug("Added WS90 battery sensor: %s = %s%%", battery_key, battery_val)
+                    # Check for WS90 metadata (indicates WS90 device presence)
+                    if ("battery" in item and item["battery"] and
+                        "ws90_ver" in item and item["ws90_ver"]):
+                        ws90_metadata = {
+                            "battery": item["battery"],
+                            "voltage": item.get("voltage"),
+                            "ws90cap_volt": item.get("ws90cap_volt"),
+                            "ws90_ver": item["ws90_ver"]
+                        }
+                        _LOGGER.info("Detected WS90 device with version: %s", item["ws90_ver"])
+                        
+                        # Add battery sensor for WS90
+                        battery_key = "ws90batt"
+                        battery_val = str(int(item["battery"]) * 20) if item["battery"].isdigit() else item["battery"]
+                        all_sensor_items.append({"id": battery_key, "val": battery_val})
+                        _LOGGER.debug("Added WS90 battery sensor: %s = %s%%", battery_key, battery_val)
         
         # Extract ch_aisle data (WH31 temperature/humidity sensors)
         ch_aisle = raw_data.get("ch_aisle", [])
@@ -274,6 +284,10 @@ class EcowittLocalDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                             all_sensor_items.append({"id": battery_key, "val": battery_pct})
                             _LOGGER.debug("Added WH31 battery sensor: %s = %s%%", battery_key, battery_pct)
         
+        # Handle WS90 device detection and synthetic mapping
+        if ws90_metadata:
+            await self._handle_ws90_device(ws90_metadata)
+        
         _LOGGER.debug("Total sensor items to process: %d", len(all_sensor_items))
         
         for item in all_sensor_items:
@@ -288,9 +302,10 @@ class EcowittLocalDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
                 _LOGGER.debug("Skipping sensor %s with empty value (include_inactive=%s)", sensor_key, self._include_inactive)
                 continue
                 
-            # Get hardware ID for this sensor (only for non-gateway sensors)
+            # Get hardware ID for this sensor (dynamic gateway detection)
             hardware_id = None
-            if sensor_key not in GATEWAY_SENSORS:
+            is_gateway_sensor = self._is_gateway_sensor(sensor_key, ws90_metadata is not None)
+            if not is_gateway_sensor:
                 hardware_id = self.sensor_mapper.get_hardware_id(sensor_key)
                 _LOGGER.debug("Hardware ID lookup for %s: %s", sensor_key, hardware_id)
             
@@ -589,6 +604,115 @@ class EcowittLocalDataUpdateCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
             _LOGGER.debug("Error extracting model from firmware version '%s': %s", firmware_version, err)
         
         return "Unknown"
+
+    async def _handle_ws90_device(self, ws90_metadata: Dict[str, Any]) -> None:
+        """Handle WS90 device detection and create synthetic device mapping."""
+        try:
+            # Generate or extract hardware ID for WS90
+            # We'll use a predictable ID based on version or create one
+            ws90_hardware_id = await self._get_or_generate_ws90_hardware_id(ws90_metadata)
+            
+            if not ws90_hardware_id:
+                _LOGGER.warning("Could not determine hardware ID for WS90 device")
+                return
+            
+            # Create synthetic sensor mapping for WS90
+            ws90_sensor_info = {
+                "id": ws90_hardware_id,
+                "img": "ws90",  # Correct model name
+                "name": "WS90 Weather Station",
+                "type": "90",  # WS90 type
+                "batt": ws90_metadata.get("battery", "5"),
+                "rssi": "--",
+                "signal": "4",  # Default good signal
+                "idst": "1"
+            }
+            
+            # Add to sensor mapper synthetic mapping
+            self.sensor_mapper._sensor_info[ws90_hardware_id] = {
+                "hardware_id": ws90_hardware_id,
+                "sensor_type": "WS90",
+                "channel": "",
+                "device_model": "ws90",
+                "battery": ws90_metadata.get("battery", "5"),
+                "signal": "4",
+                "raw_data": ws90_sensor_info,
+            }
+            
+            # Map hex ID sensors to WS90 hardware ID
+            hex_id_sensors = [
+                "0x02", "0x03", "0x07", "0x0B", "0x0C", "0x19", "0x0A", "0x6D",
+                "0x15", "0x17", "0x0D", "0x0E", "0x7C", "0x10", "0x11", "0x12",
+                "0x13", "0x14", "3", "5", "srain_piezo", "ws90batt"
+            ]
+            
+            for sensor_key in hex_id_sensors:
+                self.sensor_mapper._hardware_mapping[sensor_key] = ws90_hardware_id
+                _LOGGER.debug("Mapped sensor %s to WS90 hardware_id %s", sensor_key, ws90_hardware_id)
+            
+            _LOGGER.info("Created synthetic WS90 device mapping for hardware_id: %s", ws90_hardware_id)
+            
+        except Exception as err:
+            _LOGGER.warning("Failed to handle WS90 device: %s", err)
+
+    async def _get_or_generate_ws90_hardware_id(self, ws90_metadata: Dict[str, Any]) -> Optional[str]:
+        """Get or generate hardware ID for WS90 device."""
+        try:
+            # First, try to extract from existing sensor mappings (from /get_sensors_info)
+            # Look for any device that might be the WS90 but misidentified
+            for hardware_id, sensor_info in self.sensor_mapper._sensor_info.items():
+                device_model = sensor_info.get("device_model", "").lower()
+                if device_model == "wh90" or "wh90" in device_model:
+                    # Found existing WS90 entry, update it to correct model
+                    sensor_info["device_model"] = "ws90"
+                    sensor_info["sensor_type"] = "WS90"
+                    _LOGGER.info("Found existing WS90 device with hardware_id: %s, updated model", hardware_id)
+                    return hardware_id
+            
+            # If not found in sensor mappings, try to generate a predictable ID
+            # Use WS90 version as part of the ID for consistency
+            ws90_version = ws90_metadata.get("ws90_ver", "")
+            if ws90_version:
+                # Generate hardware ID based on version (e.g., "WS90v158" -> "D535")
+                # This should ideally match what's shown in the gateway UI
+                generated_id = f"D{ws90_version[-3:] if len(ws90_version) >= 3 else ws90_version}"
+                _LOGGER.info("Generated WS90 hardware_id: %s from version: %s", generated_id, ws90_version)
+                return generated_id
+            
+            # Fallback: use a default ID
+            default_id = "WS90_DEFAULT"
+            _LOGGER.warning("Using fallback hardware_id for WS90: %s", default_id)
+            return default_id
+            
+        except Exception as err:
+            _LOGGER.warning("Error generating WS90 hardware ID: %s", err)
+            return None
+
+    def _is_gateway_sensor(self, sensor_key: str, ws90_present: bool) -> bool:
+        """Determine if sensor belongs to gateway device dynamically.
+        
+        Args:
+            sensor_key: The sensor key to check
+            ws90_present: Whether WS90 device is detected
+            
+        Returns:
+            True if sensor belongs to gateway device
+        """
+        # Always gateway sensors
+        if sensor_key in GATEWAY_SENSORS:
+            return True
+            
+        # Dynamic assignment: these sensors belong to gateway only when no WS90
+        dynamic_sensors = {"3", "5"}  # Feels like temp, VPD
+        if sensor_key in dynamic_sensors and not ws90_present:
+            return True
+            
+        # WS90 sensors when WS90 is present
+        if sensor_key in WS90_HEX_SENSORS and ws90_present:
+            return False
+            
+        # Default: assume gateway sensor if no hardware mapping
+        return True
 
     async def async_refresh_mapping(self) -> None:
         """Force refresh of sensor mapping."""

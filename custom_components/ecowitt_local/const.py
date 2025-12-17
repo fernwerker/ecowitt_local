@@ -39,8 +39,15 @@ GATEWAY_SENSORS: Final = {
     "humidityin",   # Indoor humidity
     "baromabsin",   # Absolute pressure
     "baromrelin",   # Relative pressure
-    "3",            # Feels like temperature (gateway sensor)
-    "5",            # Vapor Pressure Deficit (gateway sensor)
+    # NOTE: Removed "3" and "5" as these are WS90 sensors when WS90 is present
+    # They will be dynamically assigned to gateway only when no WS90 detected
+}
+
+# WS90 outdoor sensors (hex IDs that belong to WS90 when present)
+WS90_HEX_SENSORS: Final = {
+    "0x02", "0x03", "0x07", "0x0B", "0x0C", "0x19", "0x0A", "0x6D",
+    "0x15", "0x17", "0x0D", "0x0E", "0x7C", "0x10", "0x11", "0x12",
+    "0x13", "0x14", "3", "5", "srain_piezo", "ws90batt"
 }
 
 
@@ -385,6 +392,18 @@ SENSOR_TYPES: Final = {
         "device_class": "precipitation",
         "state_class": "total_increasing"
     },
+    "0x14": {
+        "name": "Rain Total",
+        "unit": "mm",
+        "device_class": "precipitation",
+        "state_class": "total_increasing"
+    },
+    "srain_piezo": {
+        "name": "Rain Piezo",
+        "unit": "mm",
+        "device_class": "precipitation",
+        "state_class": "measurement"
+    },
 }
 
 # Add dynamically generated channel sensors
@@ -495,7 +514,7 @@ BATTERY_SENSORS: Final = {
     },
     "ws90batt": {
         "name": "WS90 Weather Station Battery",
-        "sensor_key": "0x02"
+        "sensor_key": "ws90batt"  # Self-referencing for proper mapping
     },
     "wh90batt": {
         "name": "WH90 Weather Station Battery",

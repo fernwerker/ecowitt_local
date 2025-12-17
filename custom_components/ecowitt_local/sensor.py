@@ -331,12 +331,14 @@ class EcowittLocalSensor(CoordinatorEntity[EcowittLocalDataUpdateCoordinator], S
         
         type_names = {
             "wh51": "Soil Moisture Sensor",
-            "wh31": "Temperature/Humidity Sensor", 
+            "wh31": "Temperature/Humidity Sensor",
             "wh41": "PM2.5 Air Quality Sensor",
             "wh55": "Leak Sensor",
             "wh57": "Lightning Sensor",
             "wh40": "Rain Sensor",
             "wh68": "Weather Station",
+            "ws90": "WS90 Weather Station",
+            "wh90": "WS90 Weather Station",  # Handle misidentified WH90 as WS90
             "soil": "Soil Moisture Sensor",
             "temp_hum": "Temperature/Humidity Sensor",
             "pm25": "PM2.5 Air Quality Sensor",
@@ -353,7 +355,7 @@ class EcowittLocalSensor(CoordinatorEntity[EcowittLocalDataUpdateCoordinator], S
         sensor_type = sensor_info.get("sensor_type", "").lower()
         
         outdoor_types = {
-            "wh51", "wh41", "wh55", "wh57", "wh40", "wh68",
+            "wh51", "wh41", "wh55", "wh57", "wh40", "wh68", "ws90", "wh90",
             "soil", "pm25", "leak", "lightning", "rain", "weather_station"
         }
         
